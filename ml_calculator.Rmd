@@ -1,0 +1,806 @@
+---
+title: 'Using Machine Learning to Teach Basic Arithmetic to a 2015 13" MacBook Pro'
+author: "Levi Moneyhun"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(caret)
+library(keras)
+library(randomForest)
+library(tensorflow)
+set.seed(69420)
+```
+
+## ~mAcHiNE lEArNiNG~ 
+
+You've probably heard that machine learning is going to change the world any minute (or maybe it already has!). The idea seems promising: given enough data and enough computational power, a variety of algorithms enable computers to teach themselves to, e.g., identify hand-written numbers, recommend songs and videos, and evaluate job applicants. 
+
+A typical machine learning alogorithm functions as a "black box" which takes an input and returns an output. Unlike OLS regression, the parameters of the function within this black box have no real meaning. Additionally, creating this function requires little to no prior understanding of the relationship between the input and the output—all it requires is a training dataset with correct mappings of inputs to outputs. 
+
+Machine learning is ideal for situations where (a) data and processing power are abundant but (b) the input-output relationship is hard to describe or discern. Consider the example of indentifying hand-written numbers: when presented with 100 hand-written numbers, you could probably identify which of these were the number 5, but you would struggle to write an algorithm to explicitly perform this identification.
+
+Mostly just for kicks, but also to demonstrate why machine learning is a bit silly for some appliactions, I will use it to approach a very different problem: simple math.  
+
+## Addition
+
+Based on my memories of elementary school, addition was the easiest of the four basic mathematical functions. Hopefully the computer will feel the same way. 
+
+To start, we need to generate some training and testing data. Let's start with 1,000 rows. 
+
+```{r generate addition data 1}
+addition_data <- data.frame(
+    addend_a = sample(1:100, 1000, replace = T), 
+    addend_b = sample(1:100, 1000, replace = T)) %>%
+  mutate(sum = addend_a + addend_b)
+```
+
+First, we need to partition the data into a training set and a testing set. It seems like an 80/20 split is fairly standard, so let's do that. 
+
+```{r parition data 1}
+train_index <- createDataPartition(addition_data$sum,
+                    p = .8, 
+                    list = F, 
+                    times = 1)
+
+test_data <- addition_data[-train_index,]
+```
+
+Since addition can return an infinite range of values, we should really use regression models rather than classification models. Since we're only adding integers between 1 and 100, there are only 199 (2 to 200) possible outcomes, so we could use classification, but (unlike this exercise in general) that would be silly. 
+
+Let's start with a basic random forest regression with all default parameters. 
+
+# Random Forest
+
+[EXPLAIN RANDOM FORESTS]
+
+```{r random forest attempt 1}
+addition_rf_1 <- randomForest(sum ~ ., 
+                              subset = train_index,
+                              data = addition_data)
+```
+
+How did we do on our first attempt? We don't want to peek at the prediction results on the testing set until we've settled on a final model, so for now, we'll just validate using this model's predictions on the training set. Below, I'll calculate minimum, max, mean, and median difference between the actual and preidcted sum. 
+
+```{r random forest attempt 1 predictions}
+diagnostics <- function(model) {
+  list(
+    min = min(abs(model$y - model$predicted)),
+    max = max(abs(model$y - model$predicted)),
+    mean = mean(abs(model$y - model$predicted)),
+    median = median(abs(model$y - model$predicted)))}
+
+diagnostics(addition_rf_1)
+
+```
+
+Not too bad—certainly better than my first attempt at addition. Let's see how the model would do with a larger forest (the default was 500, we'll try four times that and then twenty times that). 
+
+```{r random forest attempt 2}
+addition_rf_2 <- randomForest(sum ~ ., 
+                              subset = train_index,
+                              data = addition_data, 
+                              ntree = 2000)
+
+diagnostics(addition_rf_2)
+
+```
+
+```{r random forest attempt 3}
+
+addition_rf_3 <- randomForest(sum ~ ., 
+                              subset = train_index,
+                              data = addition_data, 
+                              ntree = 10000)
+
+diagnostics(addition_rf_3)
+```
+
+It seems like increasing the size of our forest is resulting in diminishing marginal returns to accuracy.  Maybe our data just isn't big enough—after all, 800 observations hardly counts as Big Data. But before we move on, let's see how well we did on the 200 observations we reserved for testing. 
+
+```{r test random forest 3}
+test_data$predicted1 <- predict(addition_rf_1, test_data)
+test_data$predicted2 <- predict(addition_rf_2, test_data)
+test_data$predicted3 <- predict(addition_rf_3, test_data)
+
+test_diagnostics <- test_data %>% 
+  summarize(mean_error1 = mean(abs(sum - predicted1)),
+         mean_error2 = mean(abs(sum - predicted2)),
+         mean_error3 = mean(abs(sum - predicted3)))
+
+test_diagnostics
+
+```
+
+10,000 also isn't really Big Data, but let's try that first. Since the bigger forests didn't help much, I'll revert to the default 500 trees. 
+
+```{r bigger data}
+addition_data <- data.frame(
+    addend_a = sample(1:100, 10000, replace = T), 
+    addend_b = sample(1:100, 10000, replace = T)) %>%
+  mutate(sum = addend_a + addend_b)
+
+train_index <- createDataPartition(addition_data$sum,
+                    p = .8, 
+                    list = F, 
+                    times = 1)
+
+test_data <- addition_data[-train_index, ]
+
+addition_rf_4 <- randomForest(sum ~ ., 
+                              subset = train_index,
+                              data = addition_data)
+
+diagnostics(addition_rf_4)
+```
+
+Using ten times more data improves our in-sample accuracy far more than using twenty times more trees. This doesn't necessarily imply that number-of-observations is more than twice as important as number-of-trees, but this does suggest that data, rather than model depth, tends to be the limiting factor in machine learning. 
+
+Next, I was going to try enlarging our data by a factor of ten once more. But, before doing so, I realized that technically 10,000 rows is sufficient to include every possible combination of inputs. What if, instead of randomly sampling each addend, I fed the model every possible input? For a fair comparison, I'll also make a model for the full randomly-sampled data (rather than just the 8,000 reserved for training).
+
+```{r full-coverage data}
+fc_data <- expand.grid(
+    addend_a = 1:100, 
+    addend_b = 1:100) %>%
+  mutate(sum = addend_a + addend_b)
+
+addition_rf_5 <- randomForest(sum ~ ., 
+                              data = fc_data)
+diagnostics(addition_rf_5)
+```
+
+```{r random data}
+addition_rf_6 <- randomForest(sum ~ ., 
+                              data = addition_data)
+diagnostics(addition_rf_6)
+```
+
+It seems that the full coverage data doesn't result in better in-sample predictions than the random data. Let's compare how they perform on 1,000 rows of newly generated test data. 
+
+```{r compare on new test data}
+test_data <- data.frame(
+    addend_a = sample(1:100, 1000, replace = T), 
+    addend_b = sample(1:100, 1000, replace = T)) %>%
+  mutate(sum = addend_a + addend_b)
+
+test_data$predicted5 <- predict(addition_rf_5, test_data)
+test_data$predicted6 <- predict(addition_rf_6, test_data)
+
+
+test_diagnostics <- test_data %>% 
+  summarize(
+    mean_error5 = mean(abs(sum - predicted5)),
+    mean_error6 = mean(abs(sum - predicted6)))
+
+test_diagnostics
+```
+
+The model trained on the full-coverage data appears to result in better out-of-sample predictions (although, becuase there is a finite universe of inputs and outputs and because the full-coverage data includes every possible correct input-output mapping, "out-of-sample" seems like a misnomer). 
+
+This led to another realization: since the full-coverage data includes all possible input-output pairs, there's no danger to overfitting. A model fit rigidly to the full-coverage data should be accurate, while models fit rigidly to other datasets might not be. To test this hypothesis, I compared the difference in effect when increasing model depth for each dataset. 
+
+```{r compare depth effects}
+addition_rf_7 <- randomForest(sum ~ ., 
+                              data = fc_data, 
+                              ntree = 5000)
+addition_rf_8 <- randomForest(sum ~ ., 
+                              data = addition_data, 
+                              ntree = 5000)
+
+test_data$predicted7 <- predict(addition_rf_7, test_data)
+test_data$predicted8 <- predict(addition_rf_8, test_data)
+
+
+test_diagnostics <- test_data %>% 
+  summarize(
+    mean_error7 = mean(abs(sum - predicted7)),
+    mean_error8 = mean(abs(sum - predicted8)))
+
+test_diagnostics
+```
+
+The hypothesis appears to hold: error decreased for the full coverage data, but increased for the random data. 
+
+So far we've only considered the finite universe of addends between 1 and 100. How do these models perform on inputs outside this range? We'll test 3 input ranges: 101 to 200, -100 to -1, and -1000 to 1000. 
+
+```{r out of bounds data (101 to 200)}
+oob_test_data1 <- data.frame(
+    addend_a = sample(101:200, 1000, replace = T), 
+    addend_b = sample(101:200, 1000, replace = T)) %>%
+  mutate(sum = addend_a + addend_b)
+
+oob_test_data1$predicted7 <- predict(addition_rf_7, test_data)
+oob_test_data1$predicted8 <- predict(addition_rf_8, test_data)
+
+test_diagnostics <- oob_test_data1 %>% 
+  summarize(
+    mean_error7 = mean(abs(sum - predicted7)),
+    mean_error8 = mean(abs(sum - predicted8)))
+
+test_diagnostics
+```
+
+```{r out of bounds data (-100 to -1)}
+oob_test_data2 <- data.frame(
+    addend_a = sample(-100:-1, 1000, replace = T), 
+    addend_b = sample(-100:-1, 1000, replace = T)) %>%
+  mutate(sum = addend_a + addend_b)
+  
+oob_test_data2$predicted7 <- predict(addition_rf_7, test_data)
+oob_test_data2$predicted8 <- predict(addition_rf_8, test_data)
+
+test_diagnostics <- oob_test_data2 %>% 
+  summarize(
+    mean_error7 = mean(abs(sum - predicted7)),
+    mean_error8 = mean(abs(sum - predicted8)))
+
+test_diagnostics
+```
+
+```{r out of bounds data (-1000 to 1000)}
+oob_test_data3 <- data.frame(
+    addend_a = sample(-1000:1000, 1000, replace = T), 
+    addend_b = sample(-1000:1000, 1000, replace = T)) %>%
+  mutate(sum = addend_a + addend_b)
+
+oob_test_data3$predicted7 <- predict(addition_rf_7, test_data)
+oob_test_data3$predicted8 <- predict(addition_rf_8, test_data)
+
+test_diagnostics <- oob_test_data3 %>% 
+  summarize(
+    mean_error7 = mean(abs(sum - predicted7)),
+    mean_error8 = mean(abs(sum - predicted8)))
+
+test_diagnostics
+```
+
+These prediction are essentially garbage: our models seem to have succeeded somewhat in understanding the input-output mapping, but they have not learned the underlying relationship in a way that allows them perform well on data outside the bounds of the training set. 
+
+# Neural Networks
+
+Perhaps my computer would have more success learning by a different algorithm. 
+
+[EXPLAIN NEURAL NETS]
+
+Let's start with 1,000 observations. Since I've now realized I can just generate new testing data at will, I'll just do that instead of partitioning data (note: this will never be the case for any actual machine learning exercise). 
+
+```{r generate addition data 2}
+addition_data <- data.frame(
+    addend_a = sample(1:100, 1000, replace = T), 
+    addend_b = sample(1:100, 1000, replace = T)) %>%
+  mutate(sum = addend_a + addend_b)
+```
+
+```{r basic neural net}
+x <- as.matrix(addition_data %>% select(addend_a, addend_b))
+y <- as.matrix(addition_data %>% select(sum))
+  
+nn_add <- keras_model_sequential() 
+nn_add %>% 
+  layer_dense(units = 420, input_shape = 2) %>% 
+  layer_dense(units = 69) %>%
+  layer_dense(units = 1)
+
+nn_add %>% compile(
+  loss = 'mse',
+  optimizer = optimizer_rmsprop(),
+  metrics = c('mean_absolute_error')
+)
+
+epochs <- 80
+
+# Fit the model and store training stats
+history <- nn_add %>% fit(
+  x,
+  y,
+  epochs = epochs,
+  validation_split = 0.2,
+  verbose = 0
+)
+```
+Now that we've built the model, let's test. 
+
+```{r test neural net 1}
+test_data <- data.frame(
+    addend_a = sample(1:100, 1000, replace = T), 
+    addend_b = sample(1:100, 1000, replace = T)) %>%
+  mutate(sum = addend_a + addend_b)
+x_test <- as.matrix(test_data %>% select(addend_a, addend_b))
+y_test <- as.matrix(test_data %>% select(sum))
+
+nn_add %>% evaluate(x_test, y_test, verbose = 0)
+```
+
+This neural net model actually performs worse than any of the random forest models we developed.  Let's see if it has a similar inability to predict on inputs outside of 1 to 100.   
+
+```{r test neural net with out of bounds data}
+oob_test_data <- data.frame(
+    addend_a = sample(101:200, 1000, replace = T), 
+    addend_b = sample(101:200, 1000, replace = T)) %>%
+  mutate(sum = addend_a + addend_b)
+x_test <- as.matrix(oob_test_data %>% select(addend_a, addend_b))
+y_test <- as.matrix(oob_test_data %>% select(sum))
+
+nn_add %>% evaluate(x_test, y_test, verbose = 0)
+```
+
+The error is higher than on the "in bounds" inputs, but it seems that this model has done a better job of learning the fundamental mechanism of addition. Since this seems promising, I'm going to see how the neural net does with a lot more data. 
+
+```{r generate addition data 3}
+addition_data <- data.frame(
+    addend_a = sample(1:100, 100000, replace = T), 
+    addend_b = sample(1:100, 100000, replace = T)) %>%
+  mutate(sum = addend_a + addend_b)
+
+x <- as.matrix(addition_data %>% select(addend_a, addend_b))
+y <- as.matrix(addition_data %>% select(sum))
+  
+nn_add2 <- keras_model_sequential() 
+nn_add2 %>% 
+  layer_dense(units = 420, input_shape = 2) %>% 
+  layer_dense(units = 69) %>%
+  layer_dense(units = 1)
+
+nn_add2 %>% compile(
+  loss = 'mse',
+  optimizer = optimizer_rmsprop(),
+  metrics = c('mean_absolute_error')
+)
+
+epochs <- 80
+
+# Fit the model and store training stats
+history <- nn_add2 %>% fit(
+  x,
+  y,
+  epochs = epochs,
+  validation_split = 0.2,
+  verbose = 0
+)
+```
+
+```{r test bigger neural net}
+test_data <- data.frame(
+    addend_a = sample(1:100, 1000, replace = T), 
+    addend_b = sample(1:100, 1000, replace = T)) %>%
+  mutate(sum = addend_a + addend_b)
+x_test <- as.matrix(test_data %>% select(addend_a, addend_b))
+y_test <- as.matrix(test_data %>% select(sum))
+
+nn_add2 %>% evaluate(x_test, y_test, verbose = 0)
+```
+
+Hey, that's pretty good! Let's see how it does on "out of bounds" data. 
+
+```{r test bigger neural net with out of bounds data}
+oob_test_data <- data.frame(
+    addend_a = sample(101:1000, 1000, replace = T), 
+    addend_b = sample(101:1000, 1000, replace = T)) %>%
+  mutate(sum = addend_a + addend_b)
+x_test <- as.matrix(oob_test_data %>% select(addend_a, addend_b))
+y_test <- as.matrix(oob_test_data %>% select(sum))
+
+nn_add2 %>% evaluate(x_test, y_test, verbose = 0)
+```
+
+Also pretty good. What about negative numbers?
+
+```{r test bigger neural net with negative out of bounds data}
+oob_test_data <- data.frame(
+    addend_a = sample(-1000:0, 1000, replace = T), 
+    addend_b = sample(-1000:0, 1000, replace = T)) %>%
+  mutate(sum = addend_a + addend_b)
+x_test <- as.matrix(oob_test_data %>% select(addend_a, addend_b))
+y_test <- as.matrix(oob_test_data %>% select(sum))
+
+nn_add2 %>% evaluate(x_test, y_test, verbose = 0)
+```
+
+It seems like the model has actually come pretty close to learning the underlying mechanism! This success, however, is unlikely to extend to other mathematical functions. Because this neural net used simple linear activation functions (rather than more popular RELU activation functions) alongside a mean-squared-error loss function, it's essentially just a very convoluted way of doing gradient descent OLS linear regression, which is itself needlessly convoluted (OLS estimations can be calculated using simple matrix algebra). 
+
+A simple OLS model should be able to get very close to 100% accuracy with only a small amount of data (and minimal computational power). Let's try just 10 rows. 
+
+```{r OLS model}
+tiny_data <- data.frame(
+    addend_a = sample(1:100, 10, replace = T), 
+    addend_b = sample(1:100, 10, replace = T)) %>%
+  mutate(sum = addend_a + addend_b)
+
+ols_add <- lm(sum ~ ., tiny_data)
+
+oob_test_data <- data.frame(
+    addend_a = sample(-1000:1000, 1000, replace = T), 
+    addend_b = sample(-1000:1000, 1000, replace = T)) %>%
+  mutate(sum = addend_a + addend_b)
+
+oob_test_data$ols_predicted <- predict(ols_add, oob_test_data)
+
+test_diagnostics <- oob_test_data %>% 
+  summarize(
+    ols_mean_error = mean(abs(sum - ols_predicted)),
+    ols_max_error = mean(abs(sum - ols_predicted)))
+
+test_diagnostics
+```
+
+Explict OLS yields infinitessimal error, attribuately likely to floating point precision, even on out of bounds data. As a result, the previous neural net model's success in learning basic addition doesn't really count, because the "correct" solution (i.e., OLS) was essentially embedded into the form of the model. I assume that the model would not be able to learn multiplication, or division. It might have some luck with subtraction, so let's try that first. (This is using relatively small data, but it should give us a sense of whether we'll be able to approach a solution.)
+
+```{r basic subtraction neural net}
+subtraction_data <- data.frame(
+    a = sample(1:100, 1000, replace = T), 
+    b = sample(1:100, 1000, replace = T)) %>%
+  mutate(difference = a - b)
+
+x <- as.matrix(subtraction_data %>% select(a, b))
+y <- as.matrix(subtraction_data %>% select(difference))
+  
+nn_subtract <- keras_model_sequential() 
+nn_subtract %>% 
+  layer_dense(units = 420, input_shape = 2) %>% 
+  layer_dense(units = 69) %>%
+  layer_dense(units = 1)
+
+nn_subtract %>% compile(
+  loss = 'mse',
+  optimizer = optimizer_rmsprop(),
+  metrics = c('mean_absolute_error')
+)
+
+epochs <- 80
+
+# Fit the model and store training stats
+history <- nn_subtract %>% fit(
+  x,
+  y,
+  epochs = epochs,
+  validation_split = 0.2,
+  verbose = 0
+)
+```
+
+```{r test subtraction neural net}
+test_data <- data.frame(
+     a = sample(1:100, 1000, replace = T), 
+     b = sample(1:100, 1000, replace = T)) %>%
+  mutate(difference = a - b)
+x_test <- as.matrix(test_data %>% select(a, b))
+y_test <- as.matrix(test_data %>% select(difference))
+nn_subtract %>% evaluate(x_test, y_test, verbose = 0)
+
+oob_test_data <- data.frame(
+     a = sample(-100:0, 1000, replace = T), 
+     b = sample(-100:0, 1000, replace = T)) %>%
+  mutate(difference = a - b)
+x_test <- as.matrix(oob_test_data %>% select(a, b))
+y_test <- as.matrix(oob_test_data %>% select(difference))
+nn_subtract %>% evaluate(x_test, y_test, verbose = 0)
+
+```
+
+Looks like subtraction is good! This makes sense, given that it's essentially just negated addition. This also supports my conclussion that the neural net model here is essentially just tortured Rube Goldberg version of OLS.  
+
+Let's try multiplication with the same neural net specifications. 
+
+```{r basic multiplication neural net}
+multiplication_data <- data.frame(
+    a = sample(1:100, 1000, replace = T), 
+    b = sample(1:100, 1000, replace = T)) %>%
+  mutate(product = a * b)
+
+x <- as.matrix(multiplication_data %>% select(a, b))
+y <- as.matrix(multiplication_data %>% select(product))
+  
+nn_multiply <- keras_model_sequential() 
+nn_multiply %>% 
+  layer_dense(units = 420, input_shape = 2) %>% 
+  layer_dense(units = 69) %>%
+  layer_dense(units = 1)
+
+nn_multiply %>% compile(
+  loss = 'mse',
+  optimizer = optimizer_rmsprop(),
+  metrics = c('mean_absolute_error')
+)
+
+epochs <- 80
+
+# Fit the model and store training stats
+history <- nn_multiply %>% fit(
+  x,
+  y,
+  epochs = epochs,
+  validation_split = 0.2,
+  verbose = 0
+)
+
+test_data <- data.frame(
+    a = sample(1:100, 1000, replace = T), 
+    b = sample(1:100, 1000, replace = T)) %>%
+  mutate(product = a * b)
+x_test <- as.matrix(test_data %>% select(a, b))
+y_test <- as.matrix(test_data %>% select(product))
+nn_multiply %>% evaluate(x_test, y_test, verbose = 0)
+
+oob_test_data <- data.frame(
+    a = sample(1:100, 1000, replace = T), 
+    b = sample(1:100, 1000, replace = T)) %>%
+  mutate(product = a * b)
+x_test <- as.matrix(oob_test_data %>% select(a, b))
+y_test <- as.matrix(oob_test_data %>% select(product))
+nn_multiply %>% evaluate(x_test, y_test, verbose = 0)
+```
+
+Complete failure. Will more data save it? More layers? Different activation functions? More iterations? We'll try all four. My guess is that the linear activation functions are problematic, so I'll change everything to a sigmoid. 
+
+```{r bigger multiplication neural net}
+multiplication_data <- data.frame(
+    a = sample(1:100, 10000, replace = T), 
+    b = sample(1:100, 10000, replace = T)) %>%
+  mutate(product = a * b)
+
+x <- as.matrix(multiplication_data %>% select(a, b))
+y <- as.matrix(multiplication_data %>% select(product))
+  
+nn_multiply <- keras_model_sequential() 
+nn_multiply %>% 
+  layer_dense(units = 420, activation = 'sigmoid', input_shape = 2) %>% 
+  layer_dense(units = 69, activation = 'sigmoid') %>%
+  layer_dense(units = 420, activation = 'sigmoid') %>%
+  layer_dense(units = 69, activation = 'sigmoid') %>%
+  layer_dense(units = 1)
+
+nn_multiply %>% compile(
+  loss = 'mse',
+  optimizer = optimizer_rmsprop(),
+  metrics = c('mean_absolute_error')
+)
+
+epochs <- 160
+
+# Fit the model and store training stats
+history <- nn_multiply %>% fit(
+  x,
+  y,
+  epochs = epochs,
+  validation_split = 0.2,
+  verbose = 0
+)
+
+test_data <- data.frame(
+    a = sample(1:100, 1000, replace = T), 
+    b = sample(1:100, 1000, replace = T)) %>%
+  mutate(product = a * b)
+x_test <- as.matrix(test_data %>% select(a, b))
+y_test <- as.matrix(test_data %>% select(product))
+nn_multiply %>% evaluate(x_test, y_test, verbose = 0)
+
+oob_test_data <- data.frame(
+    a = sample(-100:0, 1000, replace = T), 
+    b = sample(-100:0, 1000, replace = T)) %>%
+  mutate(product = a * b)
+x_test <- as.matrix(oob_test_data %>% select(a, b))
+y_test <- as.matrix(oob_test_data %>% select(product))
+nn_multiply %>% evaluate(x_test, y_test, verbose = 0)
+```
+
+For both "in bounds" and "out of bounds" data, this was actually even worse. At this point I decided I should actually do some research. I found two interesting things: 1) per the universal approximation theorem, a single-layer neural net can model any approximate any function; 2) multiplication is actually pretty difficult for networks. Let's simplify to only inputs 1-10. Also, based on some deeper theory that I don't fully understand, I'm losing the sigmoid activation functions and using SELU and TANH instead. 
+
+```{r different multiplication neural net}
+multiplication_data <- data.frame(
+    a = sample(1:10, 10000, replace = T), 
+    b = sample(1:10, 10000, replace = T)) %>%
+  mutate(product = a * b)
+
+x <- as.matrix(multiplication_data %>% select(a, b))
+y <- as.matrix(multiplication_data %>% select(product))
+  
+nn_multiply <- keras_model_sequential() 
+nn_multiply %>% 
+  layer_dense(units = 10, activation = 'selu', input_shape = 2) %>%
+  layer_dense(units = 10, activation = 'tanh') %>%
+  layer_dense(units = 1)
+
+
+nn_multiply %>% compile(
+  loss = 'mse',
+  optimizer = optimizer_rmsprop(),
+  metrics = c('mean_absolute_error')
+)
+
+
+epochs <- 50
+
+# Fit the model and store training stats
+history <- nn_multiply %>% fit(
+  x,
+  y,
+  epochs = epochs,
+  validation_split = 0.2,
+  verbose = 0
+)
+
+plot(history, metrics = "mean_absolute_error", smooth = FALSE) +
+  coord_cartesian(ylim = c(0, 50))
+
+test_data <- data.frame(
+    a = sample(1:10, 1000, replace = T), 
+    b = sample(1:10, 1000, replace = T)) %>%
+  mutate(product = a * b)
+x_test <- as.matrix(test_data %>% select(a, b))
+y_test <- as.matrix(test_data %>% select(product))
+nn_multiply %>% evaluate(x_test, y_test, verbose = 0)
+
+oob_test_data <- data.frame(
+    a = sample(-100:1000, 1000, replace = T), 
+    b = sample(-100:1000, 1000, replace = T)) %>%
+  mutate(product = a * b)
+x_test <- as.matrix(oob_test_data %>% select(a, b))
+y_test <- as.matrix(oob_test_data %>% select(product))
+nn_multiply %>% evaluate(x_test, y_test, verbose = 0)
+```
+
+It seems like we're getting somewhere, at least with in bounds data. Let's zoom back out to 1 to 100, add more data, and see what happens. 
+
+```{r bigger and different multiplication neural net}
+multiplication_data <- data.frame(
+    a = sample(1:100, 100000, replace = T), 
+    b = sample(1:100, 100000, replace = T)) %>%
+  mutate(product = a * b)
+
+x <- as.matrix(multiplication_data %>% select(a, b))
+y <- as.matrix(multiplication_data %>% select(product))
+  
+nn_multiply <- keras_model_sequential() 
+nn_multiply %>% 
+  layer_dense(units = 10, activation = 'selu', input_shape = 2) %>%
+  layer_dense(units = 10, activation = 'tanh') %>%
+  layer_dense(units = 1)
+
+
+nn_multiply %>% compile(
+  loss = 'mse',
+  optimizer = optimizer_rmsprop(),
+  metrics = c('mean_absolute_error')
+)
+
+# Fit the model and store training stats
+history <- nn_multiply %>% fit(
+  x,
+  y,
+  epochs = epochs,
+  validation_split = 0.2,
+  verbose = 0
+)
+
+test_data <- data.frame(
+    a = sample(1:100, 1000, replace = T), 
+    b = sample(1:100, 1000, replace = T)) %>%
+  mutate(product = a * b)
+x_test <- as.matrix(test_data %>% select(a, b))
+y_test <- as.matrix(test_data %>% select(product))
+nn_multiply %>% evaluate(x_test, y_test, verbose = 0)
+
+oob_test_data <- data.frame(
+    a = sample(-100:1000, 1000, replace = T), 
+    b = sample(-100:1000, 1000, replace = T)) %>%
+  mutate(product = a * b)
+x_test <- as.matrix(oob_test_data %>% select(a, b))
+y_test <- as.matrix(oob_test_data %>% select(product))
+nn_multiply %>% evaluate(x_test, y_test, verbose = 0)
+```
+
+Garbage again. My hypothesis is that the 10 units in the dense layers are capable of handling 10 digits, but not 100 digits. If that's the case, the neural network isn't really learning multiplication, but instead just memorizing input-output mappings. What happens if we expand the first layer to 100 units?
+
+```{r 100 unit multiplication neural net}
+multiplication_data <- data.frame(
+    a = sample(1:100, 100000, replace = T), 
+    b = sample(1:100, 100000, replace = T)) %>%
+  mutate(product = a * b)
+
+x <- as.matrix(multiplication_data %>% select(a, b))
+y <- as.matrix(multiplication_data %>% select(product))
+  
+nn_multiply <- keras_model_sequential() 
+nn_multiply %>% 
+  layer_dense(units = 100, activation = 'selu', input_shape = 2) %>%
+  layer_dense(units = 10, activation = 'tanh') %>%
+  layer_dense(units = 1)
+
+
+nn_multiply %>% compile(
+  loss = 'mse',
+  optimizer = optimizer_rmsprop(),
+  metrics = c('mean_absolute_error')
+)
+
+epochs <- 50
+
+# Fit the model and store training stats
+history <- nn_multiply %>% fit(
+  x,
+  y,
+  epochs = epochs,
+  validation_split = 0.2,
+  verbose = 0
+)
+
+plot(history, metrics = "mean_absolute_error", smooth = FALSE) +
+  coord_cartesian(ylim = c(0, 10000))
+
+test_data <- data.frame(
+    a = sample(1:100, 1000, replace = T), 
+    b = sample(1:100, 1000, replace = T)) %>%
+  mutate(product = a * b)
+x_test <- as.matrix(test_data %>% select(a, b))
+y_test <- as.matrix(test_data %>% select(product))
+nn_multiply %>% evaluate(x_test, y_test, verbose = 0)
+
+oob_test_data <- data.frame(
+    a = sample(-100:1000, 1000, replace = T), 
+    b = sample(-100:1000, 1000, replace = T)) %>%
+  mutate(product = a * b)
+x_test <- as.matrix(oob_test_data %>% select(a, b))
+y_test <- as.matrix(oob_test_data %>% select(product))
+nn_multiply %>% evaluate(x_test, y_test, verbose = 0)
+```
+
+We see convergence, but it's slow. Let's try also upping the second layer to 100. 
+
+```{r 100 by 100 multiplication neural net}
+multiplication_data <- data.frame(
+    a = sample(1:100, 100000, replace = T), 
+    b = sample(1:100, 100000, replace = T)) %>%
+  mutate(product = a * b)
+
+x <- as.matrix(multiplication_data %>% select(a, b))
+y <- as.matrix(multiplication_data %>% select(product))
+  
+nn_multiply <- keras_model_sequential() 
+nn_multiply %>% 
+  layer_dense(units = 100, activation = 'selu', input_shape = 2) %>%
+  layer_dense(units = 100, activation = 'tanh') %>%
+  layer_dense(units = 1)
+
+
+nn_multiply %>% compile(
+  loss = 'mse',
+  optimizer = optimizer_rmsprop(),
+  metrics = c('mean_absolute_error')
+)
+
+epochs <- 50
+
+# Fit the model and store training stats
+history <- nn_multiply %>% fit(
+  x,
+  y,
+  epochs = epochs,
+  validation_split = 0.2,
+  verbose = 0
+)
+
+plot(history, metrics = "mean_absolute_error", smooth = FALSE) +
+  coord_cartesian(ylim = c(0, 10000))
+
+test_data <- data.frame(
+    a = sample(1:100, 1000, replace = T), 
+    b = sample(1:100, 1000, replace = T)) %>%
+  mutate(product = a * b)
+x_test <- as.matrix(test_data %>% select(a, b))
+y_test <- as.matrix(test_data %>% select(product))
+nn_multiply %>% evaluate(x_test, y_test, verbose = 0)
+
+oob_test_data <- data.frame(
+    a = sample(-100:1000, 1000, replace = T), 
+    b = sample(-100:1000, 1000, replace = T)) %>%
+  mutate(product = a * b)
+x_test <- as.matrix(oob_test_data %>% select(a, b))
+y_test <- as.matrix(oob_test_data %>% select(product))
+nn_multiply %>% evaluate(x_test, y_test, verbose = 0)
+```
+
+We begin to converge for the in bounds data, but we're still way off for out of bounds data. Neural nets, though great for perception tasks, appear not to be particularly well suited to learning multiplication.  
